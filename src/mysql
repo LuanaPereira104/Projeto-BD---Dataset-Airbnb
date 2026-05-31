@@ -1,1 +1,301 @@
+USE bd2;
+
+-- Criação da Tabelas
+-- Bairros
+CREATE TABLE Neighbourhoods (
+neighbourhood VARCHAR(255) NOT NULL,
+neighbourhood_group VARCHAR(255) NOT NULL,
+PRIMARY KEY (neighbourhood)
+);
+
+-- Pessoa (Anfitrião)
+CREATE TABLE Hosts (
+host_id BIGINT NOT NULL,
+host_name VARCHAR(255) NOT NULL,
+host_since DATE NULL,
+host_is_superhost TINYINT(1) NULL, -- 1=t, 0=f
+PRIMARY KEY (host_id)
+);
+
+-- Casa (Anúncio)
+CREATE TABLE Listings (
+id BIGINT NOT NULL, -- listing id
+host_id BIGINT NOT NULL,
+neighbourhood VARCHAR(255) NOT NULL,
+
+latitude DECIMAL(9,6) NULL,
+longitude DECIMAL(9,6) NULL,
+
+room_type ENUM('Entire home/apt','Private room','Shared room','Hotel room') NOT NULL,
+property_type VARCHAR(255) NOT NULL,
+
+accommodates INT NOT NULL,
+price DECIMAL(10,2) NOT NULL,
+minimum_nights INT NOT NULL,
+
+number_of_reviews INT NOT NULL DEFAULT 0,
+review_scores_rating INT NULL, -- 0..100 ou NULL
+availability_365 INT NOT NULL, -- 0..365
+
+PRIMARY KEY (id),
+
+KEY idx_listings_host (host_id),
+KEY idx_listings_neighbourhood (neighbourhood),
+
+CONSTRAINT fk_listings_host
+FOREIGN KEY (host_id) REFERENCES Hosts(host_id)
+ON UPDATE CASCADE
+ON DELETE RESTRICT,
+
+CONSTRAINT fk_listings_neighbourhood
+FOREIGN KEY (neighbourhood) REFERENCES Neighbourhoods(neighbourhood)
+ON UPDATE CASCADE
+ON DELETE RESTRICT
+);
+
+-- Calendário Diário (por Casa)
+CREATE TABLE Calendar (
+listing_id BIGINT NOT NULL,
+date DATE NOT NULL,
+available TINYINT(1) NOT NULL, -- 1=t, 0=f
+price DECIMAL(10,2) NOT NULL,
+
+PRIMARY KEY (listing_id, date),
+KEY idx_calendar_date (date),
+
+CONSTRAINT fk_calendar_listing
+FOREIGN KEY (listing_id) REFERENCES Listings(id)
+ON UPDATE CASCADE
+ON DELETE CASCADE
+);
+
+-- Avaliação
+CREATE TABLE Reviews (
+id BIGINT NOT NULL, -- review id
+listing_id BIGINT NOT NULL,
+date DATE NOT NULL,
+reviewer_id BIGINT NOT NULL,
+reviewer_name VARCHAR(255) NOT NULL,
+comments TEXT NULL,
+
+PRIMARY KEY (id),
+KEY idx_reviews_listing_date (listing_id, date),
+
+CONSTRAINT fk_reviews_listing
+FOREIGN KEY (listing_id) REFERENCES Listings(id)
+ON UPDATE CASCADE
+ON DELETE CASCADE
+);
+
+
+-- Loads
+-- Bairros
+LOAD DATA LOCAL INFILE 'C:/bd2/mysql_data/csv/neighbourhoods.csv'
+IGNORE
+INTO TABLE Neighbourhoods
+FIELDS TERMINATED BY ','
+ENCLOSED BY '"'
+LINES TERMINATED BY '\n'
+IGNORE 1 LINES
+(neighbourhood, neighbourhood_group);
+
+-- Hosts
+LOAD DATA LOCAL INFILE 'C:/bd2/mysql_data/csv/listings.csv'
+INTO TABLE Hosts
+FIELDS TERMINATED BY ',' 
+ENCLOSED BY '"'
+LINES TERMINATED BY '\n'
+IGNORE 1 LINES
+(host_id, host_name, host_since, @superhost, @d1, @d2, @d3, @d4, @d5)
+SET host_is_superhost = IF(@superhost='t',1,0);
+
+-- Listings
+LOAD DATA LOCAL INFILE 'C:/bd2/mysql_data/csv/listings_summary.csv'
+INTO TABLE Listings
+FIELDS TERMINATED BY ','
+ENCLOSED BY '"'
+LINES TERMINATED BY '\n'
+IGNORE 1 LINES
+(
+    id,
+    @name,
+    host_id,
+    @host_name,
+    @neighbourhood_group,
+    neighbourhood,
+    latitude,
+    longitude,
+    room_type,
+    price,
+    minimum_nights,
+    number_of_reviews,
+    @last_review,
+    @reviews_per_month,
+    @calc_count,
+    availability_365,
+    @reviews_ltm,
+    @license
+)
+SET
+    property_type = 'Unknown',
+    accommodates = 0,
+    review_scores_rating = NULL;
+SET FOREIGN_KEY_CHECKS = 1;
+
+
+-- Calendar
+SET FOREIGN_KEY_CHECKS = 0;
+
+LOAD DATA LOCAL INFILE 'C:/bd2/mysql_data/csv/calendar.csv'
+INTO TABLE Calendar
+FIELDS TERMINATED BY ','
+ENCLOSED BY '"'
+LINES TERMINATED BY '\n'
+IGNORE 1 LINES
+(listing_id, date, available, price, @adj, @min, @max);
+
+SET FOREIGN_KEY_CHECKS = 1;
+
+-- Reviews
+SET FOREIGN_KEY_CHECKS = 0;
+
+LOAD DATA LOCAL INFILE 'C:/bd2/mysql_data/csv/reviews.csv'
+INTO TABLE Reviews
+FIELDS TERMINATED BY ','
+ENCLOSED BY '"'
+LINES TERMINATED BY '\n'
+IGNORE 1 LINES
+(listing_id, id, date, reviewer_id, reviewer_name, comments);
+
+SET FOREIGN_KEY_CHECKS = 1;
+
+-- Verificações
+SELECT COUNT(*) FROM Neighbourhoods;
+SELECT COUNT(*) FROM Hosts;
+SELECT COUNT(*) FROM Listings;
+SELECT COUNT(*) FROM Calendar;
+SELECT COUNT(*) FROM Reviews;
+
+
+--Questões Analíticas
+--1
+SELECT 
+    l.neighbourhood,
+    l.room_type,
+    AVG(l.price) AS preco_medio,
+    MIN(l.price) AS preco_minimo,
+    MAX(l.price) AS preco_maximo,
+    COUNT(*) AS total_casas
+FROM Listings l
+GROUP BY l.neighbourhood, l.room_type
+ORDER BY l.neighbourhood, preco_medio DESC;
+
+--2
+SELECT 
+    number_of_reviews,
+    AVG(price) AS preco_medio,
+    COUNT(*) AS total_casas
+FROM Listings
+GROUP BY number_of_reviews
+ORDER BY number_of_reviews;
+
+--3
+SELECT
+    L.neighbourhood,
+    COUNT(DISTINCT L.id) AS total_casas,
+    SUM(c.available = 'f') AS dias_reservados
+FROM Listings L
+JOIN Calendar c
+    ON L.id = c.listing_id
+GROUP BY L.neighbourhood
+ORDER BY total_casas DESC, dias_reservados DESC;
+
+--4
+SELECT 
+    h.host_id,
+    h.host_name,
+    h.host_is_superhost,
+    COUNT(DISTINCT l.id) AS total_casas,
+    COUNT(r.id) AS total_avaliacoes
+FROM Hosts h
+LEFT JOIN Listings l 
+    ON h.host_id = l.host_id
+LEFT JOIN Reviews r 
+    ON l.id = r.listing_id
+GROUP BY h.host_id, h.host_name, h.host_is_superhost
+ORDER BY total_casas DESC, total_avaliacoes DESC;
+
+--5
+SELECT
+    YEAR(c.date) AS ano,
+    MONTH(c.date) AS mes,
+    l.room_type,
+    AVG(c.price) AS preco_medio_diario,
+    SUM(CASE WHEN c.available = 1 THEN 1 ELSE 0 END) AS dias_disponiveis,
+    SUM(CASE WHEN c.available = 0 THEN 1 ELSE 0 END) AS dias_indisponiveis,
+    ROUND(100 * AVG(CASE WHEN c.available = 1 THEN 1 ELSE 0 END), 2) AS taxa_disponibilidade_pct
+FROM Calendar c
+JOIN Listings l
+  ON l.id = c.listing_id
+GROUP BY YEAR(c.date), MONTH(c.date), l.room_type
+ORDER BY ano, mes, l.room_type;
+
+--6
+SELECT 
+    MONTH(date) AS mes,
+    AVG(price) AS preco_medio,
+    COUNT(CASE WHEN available = 0 THEN 1 END) AS noites_reservadas,
+    SUM(CASE WHEN available = 0 THEN price ELSE 0 END) AS valor_total_estimado
+FROM Calendar
+GROUP BY mes
+ORDER BY mes;
+
+--7
+SELECT 
+    l.id AS casa,
+    COUNT(DISTINCT r.id) AS total_avaliacoes,
+    SUM(CASE WHEN c.available = 0 THEN 1 ELSE 0 END) AS dias_reservados
+FROM Listings l
+LEFT JOIN Reviews r 
+    ON l.id = r.listing_id
+LEFT JOIN Calendar c 
+    ON l.id = c.listing_id
+GROUP BY l.id
+ORDER BY dias_reservados DESC;
+
+--8
+SELECT 
+    l.id AS casa,
+    COUNT(DISTINCT r.id) AS total_avaliacoes,
+    SUM(CASE WHEN c.available = 0 THEN 1 ELSE 0 END) AS dias_reservados
+FROM Listings l
+LEFT JOIN Reviews r 
+    ON l.id = r.listing_id
+LEFT JOIN Calendar c 
+    ON l.id = c.listing_id
+GROUP BY l.id
+ORDER BY dias_reservados DESC;
+
+--9
+SELECT 
+    YEAR(date) AS ano,
+    MONTH(date) AS mes,
+    COUNT(CASE WHEN available = 0 THEN 1 END) AS noites_reservadas,
+    SUM(CASE WHEN available = 0 THEN price ELSE 0 END) AS pagamento_total_estimado
+FROM Calendar
+GROUP BY ano, mes
+ORDER BY ano, mes;
+
+--10
+SELECT 
+    r.reviewer_id,
+    COUNT(r.id) AS total_avaliacoes,
+    l.room_type,
+    COUNT(*) AS vezes_reservado
+FROM Reviews r
+JOIN Listings l 
+    ON r.listing_id = l.id
+GROUP BY r.reviewer_id, l.room_type
+HAVING COUNT(r.id) > 5
+ORDER BY total_avaliacoes DESC;
 
