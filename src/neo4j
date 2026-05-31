@@ -1,1 +1,250 @@
+//criação de constraints e índices
+CREATE CONSTRAINT neighbourhood_name IF NOT EXISTS
+FOR (n:Neighbourhood) REQUIRE n.name IS UNIQUE;
 
+CREATE CONSTRAINT host_id IF NOT EXISTS
+FOR (h:Host) REQUIRE h.host_id IS UNIQUE;
+
+CREATE CONSTRAINT listing_id IF NOT EXISTS
+FOR (l:Listing) REQUIRE l.listing_id IS UNIQUE;
+
+CREATE CONSTRAINT review_id IF NOT EXISTS
+FOR (r:Review) REQUIRE r.review_id IS UNIQUE;
+
+CREATE CONSTRAINT reviewer_id IF NOT EXISTS
+FOR (g:Guest) REQUIRE g.reviewer_id IS UNIQUE;
+
+CREATE CONSTRAINT calendar_key IF NOT EXISTS
+FOR (c:CalendarDay) REQUIRE (c.listing_id, c.date) IS UNIQUE;
+
+CREATE INDEX listing_neighbourhood IF NOT EXISTS
+FOR (l:Listing) ON (l.neighbourhood);
+
+CREATE INDEX listing_room_type IF NOT EXISTS
+FOR (l:Listing) ON (l.room_type);
+
+CREATE INDEX calendar_year_month IF NOT EXISTS
+FOR (c:CalendarDay) ON (c.year, c.month);
+
+CREATE INDEX review_date IF NOT EXISTS
+FOR (r:Review) ON (r.date);
+
+//csv
+//importação do neighbourhood
+LOAD CSV WITH HEADERS FROM 'file:///neighbourhoods.csv' AS row
+WITH row
+WHERE row.neighbourhood IS NOT NULL AND trim(row.neighbourhood) <> ''
+MERGE (n:Neighbourhood {name: trim(row.neighbourhood)})
+SET n.neighbourhood_group = trim(coalesce(row.neighbourhood_group, ''));
+
+
+//importação dos listings
+LOAD CSV WITH HEADERS FROM 'file:///listings.csv' AS row
+WITH row
+WHERE row.id IS NOT NULL AND trim(row.id) <> ''
+MERGE (h:Host {host_id: toInteger(row.host_id)})
+SET h.host_name = trim(coalesce(row.host_name, '')),
+ h.host_since = CASE
+ WHEN row.host_since IS NULL OR trim(row.host_since) = '' THEN NULL
+ ELSE date(row.host_since)
+ END,
+ h.host_is_superhost = CASE
+ WHEN toLower(trim(coalesce(row.host_is_superhost, 'f'))) = 't' THEN true
+ ELSE false
+ END
+MERGE (n:Neighbourhood {name: trim(coalesce(row.neighbourhood_cleansed, row.neighbourhood, 'Desconhecido'))})
+ON CREATE SET n.neighbourhood_group = trim(coalesce(row.neighbourhood_group_cleansed, row.neighbourhood_group, ''))
+MERGE (l:Listing {listing_id: toInteger(row.id)})
+SET l.name = trim(coalesce(row.name, '')),
+ l.latitude = CASE WHEN row.latitude IS NULL OR trim(row.latitude) = '' THEN NULL ELSE toFloat(row.latitude) END,
+ l.longitude = CASE WHEN row.longitude IS NULL OR trim(row.longitude) = '' THEN NULL ELSE toFloat(row.longitude) END,
+ l.room_type = trim(coalesce(row.room_type, '')),
+ l.property_type = trim(coalesce(row.property_type, 'Unknown')),
+ l.accommodates = CASE WHEN row.accommodates IS NULL OR trim(row.accommodates) = '' THEN 0 ELSE toInteger(row.accommodates) END,
+ l.price = CASE
+ WHEN row.price IS NULL OR trim(row.price) = '' THEN 0.0
+ ELSE toFloat(replace(replace(replace(trim(row.price), '$', ''), ',', ''), ' ', ''))
+ END,
+ l.minimum_nights = CASE WHEN row.minimum_nights IS NULL OR trim(row.minimum_nights) = '' THEN 0 ELSE toInteger(row.minimum_nights) END,
+ l.number_of_reviews = CASE WHEN row.number_of_reviews IS NULL OR trim(row.number_of_reviews) = '' THEN 0 ELSE toInteger(row.number_of_reviews) END,
+ l.review_scores_rating = CASE WHEN row.review_scores_rating IS NULL OR trim(row.review_scores_rating) = '' THEN NULL ELSE toFloat(row.review_scores_rating) END,
+ l.availability_365 = CASE WHEN row.availability_365 IS NULL OR trim(row.availability_365) = '' THEN 0 ELSE toInteger(row.availability_365) END,
+ l.neighbourhood = trim(coalesce(row.neighbourhood_cleansed, row.neighbourhood, 'Desconhecido'))
+MERGE (h)-[:HOSTS]->(l)
+MERGE (l)-[:IN_NEIGHBOURHOOD]->(n);
+
+
+//importação parcial do calendar
+LOAD CSV WITH HEADERS FROM 'file:///calendar.csv' AS row
+WITH row
+LIMIT 25000
+WHERE coalesce(trim(row.listing_id), '') <> ''
+  AND coalesce(trim(row.date), '') <> ''
+WITH row,
+     toInteger(trim(row.listing_id)) AS listingId,
+     date(trim(row.date)) AS calendarDate
+WHERE listingId IS NOT NULL
+MERGE (c:CalendarDay {listing_id: listingId, date: calendarDate})
+SET c.available = CASE
+        WHEN toLower(trim(coalesce(row.available, 'f'))) IN ['t', 'true'] THEN true
+        ELSE false
+    END,
+    c.price = CASE
+        WHEN coalesce(trim(row.price), '') = '' THEN 0.0
+        ELSE toFloat(replace(replace(trim(row.price), '$', ''), ',', ''))
+    END,
+    c.year = toInteger(substring(trim(row.date), 0, 4)),
+    c.month = toInteger(substring(trim(row.date), 5, 2));
+
+    
+//importação parcial das reviews 
+LOAD CSV WITH HEADERS FROM 'file:///reviews.csv' AS row
+WITH row
+LIMIT 25000
+WHERE coalesce(trim(row.id), '') <> ''
+  AND coalesce(trim(row.listing_id), '') <> ''
+  AND coalesce(trim(row.reviewer_id), '') <> ''
+WITH row,
+     toInteger(trim(row.id)) AS reviewId,
+     toInteger(trim(row.listing_id)) AS listingId,
+     toInteger(trim(row.reviewer_id)) AS reviewerId
+WHERE reviewId IS NOT NULL
+  AND listingId IS NOT NULL
+  AND reviewerId IS NOT NULL
+MERGE (g:Guest {reviewer_id: reviewerId})
+SET g.reviewer_name = trim(coalesce(row.reviewer_name, ''))
+MERGE (r:Review {review_id: reviewId})
+SET r.listing_id = listingId,
+    r.date = CASE
+        WHEN coalesce(trim(row.date), '') = '' THEN NULL
+        ELSE date(trim(row.date))
+    END,
+    r.comments = coalesce(row.comments, '')
+MERGE (g)-[:WROTE]->(r);
+
+
+//criação das relações entre entidades
+MATCH (l:Listing)
+MATCH (c:CalendarDay {listing_id: l.listing_id})
+MERGE (l)-[:HAS_CALENDAR]->(c);
+
+MATCH (r:Review)
+MATCH (l:Listing {listing_id: r.listing_id})
+MERGE (r)-[:REVIEWS]->(l);
+
+// verificação dos nós criados
+MATCH (n)
+RETURN labels(n) AS tipo, count(n) AS total
+ORDER BY tipo;
+
+// verificação das relações criadas
+MATCH ()-[r]->()
+RETURN type(r) AS relacao, count(r) AS total
+ORDER BY relacao;
+
+
+//questões
+//q1
+MATCH (l:Listing)
+RETURN l.neighbourhood AS neighbourhood,
+  l.room_type AS room_type,
+  round(avg(l.price), 2) AS preco_medio,
+  min(l.price) AS preco_minimo,
+  max(l.price) AS preco_maximo,
+  count(l) AS total_casas
+ORDER BY neighbourhood, preco_medio DESC;
+
+//q2
+MATCH (l:Listing)
+WHERE l.price IS NOT NULL
+RETURN l.neighbourhood AS bairro,
+       l.room_type AS tipo_alojamento,
+       round(avg(l.price), 2) AS preco_medio,
+       round(avg(l.number_of_reviews), 2) AS media_reviews,
+       count(l) AS total_casas
+ORDER BY bairro, preco_medio DESC;
+
+//q3
+MATCH (l:Listing)
+OPTIONAL MATCH (l)-[:HAS_CALENDAR]->(c:CalendarDay)
+WITH l.neighbourhood AS neighbourhood,
+  count(DISTINCT l) AS total_casas,
+  sum(CASE WHEN c.available = false THEN 1 ELSE 0 END) AS dias_reservados
+RETURN neighbourhood, total_casas, dias_reservados
+ORDER BY total_casas DESC, dias_reservados DESC;
+
+//q4
+MATCH (h:Host)-[:HOSTS]->(l:Listing)
+OPTIONAL MATCH (l)-[:REVIEWS]-(r:Review)
+RETURN h.host_id AS host_id,
+  h.host_name AS host_name,
+  h.host_is_superhost AS superhost,
+  count(DISTINCT l) AS total_casas,
+  count(DISTINCT r) AS total_avaliacoes
+ORDER BY total_casas DESC, total_avaliacoes DESC;
+
+//q5
+MATCH (l:Listing)-[:HAS_CALENDAR]->(c:CalendarDay)
+RETURN c.year AS ano,
+  c.month AS mes,
+  l.room_type AS room_type,
+  round(avg(c.price), 2) AS preco_medio_diario,
+  sum(CASE WHEN c.available = true THEN 1 ELSE 0 END) AS dias_disponiveis,
+  sum(CASE WHEN c.available = false THEN 1 ELSE 0 END) AS dias_indisponiveis,
+  round(100.0 * avg(CASE WHEN c.available = true THEN 1.0 ELSE 0.0 END), 2) AS taxa_disponibilidade_pct
+ORDER BY ano, mes, room_type;
+
+//q6
+MATCH (l:Listing)-[:HAS_CALENDAR]->(c:CalendarDay)
+RETURN c.year AS ano,
+  c.month AS mes,
+  l.room_type AS room_type,
+  round(avg(c.price), 2) AS preco_medio,
+  round(avg(l.minimum_nights), 2) AS min_nights_medio,
+  sum(CASE WHEN c.available = false THEN 1 ELSE 0 END) AS noites_reservadas,
+  round(sum(CASE WHEN c.available = false THEN c.price ELSE 0 END), 2) AS valor_total_estimado
+ORDER BY ano, mes, valor_total_estimado DESC;
+
+//q7
+MATCH (l:Listing)
+OPTIONAL MATCH (l)-[:REVIEWS]-(r:Review)
+OPTIONAL MATCH (l)-[:HAS_CALENDAR]->(c:CalendarDay)
+WITH l,
+  count(DISTINCT r) AS total_avaliacoes,
+  sum(CASE WHEN c.available = false THEN 1 ELSE 0 END) AS dias_reservados
+RETURN l.listing_id AS casa,
+  total_avaliacoes,
+  dias_reservados
+ORDER BY dias_reservados DESC;
+
+//q8
+MATCH (l:Listing)
+OPTIONAL MATCH (l)-[:HAS_CALENDAR]->(c:CalendarDay)
+WITH l,
+  sum(CASE WHEN c.available = false THEN 1 ELSE 0 END) AS dias_reservados
+RETURN l.listing_id AS casa,
+  l.accommodates AS accommodates,
+  l.room_type AS room_type,
+  l.neighbourhood AS neighbourhood,
+  l.price AS preco_base,
+  dias_reservados
+ORDER BY dias_reservados DESC;
+
+//q9
+MATCH (:Listing)-[:HAS_CALENDAR]->(c:CalendarDay)
+RETURN c.year AS ano,
+  c.month AS mes,
+  sum(CASE WHEN c.available = false THEN 1 ELSE 0 END) AS noites_reservadas,
+  round(sum(CASE WHEN c.available = false THEN c.price ELSE 0 END), 2) AS pagamento_total_estimado
+ORDER BY ano, mes;
+
+//q10
+MATCH (g:Guest)-[:WROTE]->(r:Review)-[:REVIEWS]->(l:Listing)
+WITH g, l.room_type AS tipo_alojamento, count(r) AS total_avaliacoes
+WHERE total_avaliacoes >= 1
+RETURN g.reviewer_id AS reviewer_id,
+       g.reviewer_name AS nome_hospede,
+       tipo_alojamento,
+       total_avaliacoes
+ORDER BY total_avaliacoes DESC
+LIMIT 50;
